@@ -119,6 +119,9 @@ where
         }
     }
 
+
+    
+
     pub fn insert(&mut self, key: K, value: V) -> Result<()> {
         let mut cell = Cell::new(key, value)?;
         match self.can_insert(&mut cell) {
@@ -150,6 +153,50 @@ where
             cell_a.key.cmp(&cell_b.key)
         });
         Ok(())
+    }
+
+    // kind of upper bound, return less than key suppose if cells are 1,3,5,6 if 2 is searched it should return 1
+    pub fn find_pos(&self, key: &K) -> Result<&Cell<K, V>> {
+        let mut left = 0u16;
+        let mut right = self.offsets.len() as u16 - 1;
+        let mut result: Option<&Cell<K, V>> = None;
+
+        while left <= right {
+            let mid = (left + right) / 2;
+            let cell = self.cells.get(&(self.offsets[mid as usize] as u16)).unwrap();
+            if &cell.key == key {
+                return Ok(cell);
+            } else if &cell.key < key {
+                result = Some(cell);
+                left = mid + 1;
+            } else {
+                right = mid - 1;
+            }
+        }
+
+        match result {
+            Some(cell) => Ok(cell),
+            None => Err(anyhow::anyhow!("No such key found")),
+        }
+
+    }
+
+    pub fn find_cell(&self, key: &K) -> Option<&Cell<K, V>> {
+        let mut left = 0u16;
+        let mut right = self.offsets.len() as u16 - 1;
+
+        while left <= right {
+            let mid = (left + right) / 2;
+            let cell = self.cells.get(&(self.offsets[mid as usize] as u16)).unwrap();
+            if &cell.key == key {
+                return Some(cell);
+            } else if &cell.key < key {
+                left = mid + 1;
+            } else {
+                right = mid - 1;
+            }
+        }
+        None
     }
 }
 
