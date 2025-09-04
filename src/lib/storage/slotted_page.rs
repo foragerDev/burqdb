@@ -1,4 +1,4 @@
-use std::{cell, collections::HashMap, hash::Hash};
+use std::collections::HashMap;
 
 use anyhow::Result;
 use bincode::{config::standard, serde::encode_to_vec};
@@ -9,7 +9,7 @@ static PAGE_SIZE: usize = 4096;
 
 pub struct PageHeader<K, V> {
     page_id: u64,
-    right: Box<SlottedPage<K, V>>,
+    right: Option<Box<SlottedPage<K, V>>>,
     page_size: usize,
     offset: u16,
 }
@@ -26,7 +26,7 @@ where
     K: Serialize + for<'de> Deserialize<'de> + Ord,
     V: Serialize + for<'de> Deserialize<'de>,
 {
-    pub fn new(page_id: u64, right: Box<SlottedPage<K, V>>) -> Self {
+    pub fn new(page_id: u64, right: Option<Box<SlottedPage<K, V>>>) -> Self {
         Self {
             page_id,
             right,
@@ -68,8 +68,6 @@ where
         Ok(buffer)
     }
 
-
-
     pub fn size(&mut self) -> usize {
         match self.cached_size {
             None => {
@@ -94,7 +92,7 @@ where
     K: Serialize + for<'de> Deserialize<'de> + Ord,
     V: Serialize + for<'de> Deserialize<'de>,
 {
-    pub fn new(page_id: u64, right: Box<SlottedPage<K, V>>) -> Result<Self> {
+    pub fn new(page_id: u64, right: Option<Box<SlottedPage<K, V>>>) -> Result<Self> {
         Ok(Self {
             header: PageHeader::new(page_id, right),
             offsets: Vec::new(),
@@ -119,8 +117,9 @@ where
         }
     }
 
+    // pub fn remove(&mut self, key: &K) -> Result<()> {
 
-    
+    // }
 
     pub fn insert(&mut self, key: K, value: V) -> Result<()> {
         let mut cell = Cell::new(key, value)?;
@@ -128,20 +127,22 @@ where
             Ok(pos) => match pos {
                 Position::Free(size) => {
                     self.header.offset -= size;
+                    let offset = self.header.offset;
+                    self.header.offset -= size;
                     self.header.page_size += size as usize;
-                    self.offsets.push(size as usize);
-                    self.cells.insert(size, cell);
+                    self.offsets.push(offset as usize);
+                    self.cells.insert(offset, cell);
                 }
-                Position::Occupied(size) => {
+                Position::Occupied(at) => {
                     let index = self
                         .free_list
                         .iter()
-                        .position(|&s| s == size as usize)
+                        .position(|&s| s == at as usize)
                         .unwrap();
                     self.free_list.remove(index);
-                    self.header.page_size += size as usize;
-                    self.offsets.push(size as usize);
-                    self.cells.insert(size, cell);
+                    self.header.page_size += at as usize;
+                    self.offsets.push(at as usize);
+                    self.cells.insert(at, cell);
                 }
             },
             Err(_) => anyhow::bail!("Not enough space to insert the cell"),
@@ -163,7 +164,10 @@ where
 
         while left <= right {
             let mid = (left + right) / 2;
-            let cell = self.cells.get(&(self.offsets[mid as usize] as u16)).unwrap();
+            let cell = self
+                .cells
+                .get(&(self.offsets[mid as usize] as u16))
+                .unwrap();
             if &cell.key == key {
                 return Ok(cell);
             } else if &cell.key < key {
@@ -178,7 +182,6 @@ where
             Some(cell) => Ok(cell),
             None => Err(anyhow::anyhow!("No such key found")),
         }
-
     }
 
     pub fn find_cell(&self, key: &K) -> Option<&Cell<K, V>> {
@@ -187,7 +190,10 @@ where
 
         while left <= right {
             let mid = (left + right) / 2;
-            let cell = self.cells.get(&(self.offsets[mid as usize] as u16)).unwrap();
+            let cell = self
+                .cells
+                .get(&(self.offsets[mid as usize] as u16))
+                .unwrap();
             if &cell.key == key {
                 return Some(cell);
             } else if &cell.key < key {
@@ -211,11 +217,64 @@ mod tests {
         assert!(!serialized.is_empty());
     }
 
-    // #[test]
-    // fn test_cell_deserialization() {
-    //     let cell = Cell::new("key1".to_string(), "value1".to_string()).unwrap();
-    //     let serialized = cell._serialize().unwrap();
-    //     // let deserialized: Cell<String, String> = bincode::serde::deserialize(&serialized).unwrap();
-    //     assert_eq!(cell, deserialized);
-    // }
+    #[test]
+    fn test_cell_size() {
+        let mut cell: Cell<String, String> =
+            Cell::new("key12".to_string(), "value1".to_string()).unwrap();
+        assert_eq!(cell.size(), 17);
+    }
+
+    #[test]
+    fn test_cell_size_int() {
+        let mut cell: Cell<i32, i32> = Cell::new(1, 1).unwrap();
+        assert_eq!(cell.size(), 8);
+    }
+    #[test]
+    fn test_add_cell() {
+        let mut page = SlottedPage::new(0, None).unwrap();
+        let result = page.insert("key1".to_string(), "value1".to_string());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_find_cell() {
+        let mut page = SlottedPage::new(0, None).unwrap();
+        page.insert("key1".to_string(), "value1".to_string())
+            .unwrap();
+        let cell = page.find_cell(&"key1".to_string());
+        assert!(cell.is_some());
+    }
+
+    #[test]
+    fn test_multiple_cells() {
+        let mut page = SlottedPage::new(0, None).unwrap();
+        page.insert("key1".to_string(), "value1".to_string())
+            .unwrap();
+        page.insert("key2".to_string(), "value2".to_string())
+            .unwrap();
+        page.insert("key3".to_string(), "value3".to_string())
+            .unwrap();
+
+        let cell1 = page.find_cell(&"key1".to_string());
+        let cell2 = page.find_cell(&"key2".to_string());
+        let cell3 = page.find_cell(&"key3".to_string());
+
+        assert!(cell1.is_some());
+        assert!(cell2.is_some());
+        assert!(cell3.is_some());
+    }
+
+    #[test]
+    fn test_offset_order() {
+        println!("test offset order");
+        let mut page = SlottedPage::new(0, None).unwrap();
+        page.insert("b".to_string(), "value1".to_string()).unwrap();
+        page.insert("c".to_string(), "value2".to_string()).unwrap();
+        page.insert("a".to_string(), "value3".to_string()).unwrap();
+
+        let s = format!("{:?}", page.offsets.clone());
+        println!("{}", s);
+        let offsets = page.offsets.clone();
+        assert_eq!(offsets, vec![1, 2, 3]);
+    }
 }
