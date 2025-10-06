@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use bincode::{config::standard, serde::encode_to_vec};
-use serde::{Deserialize, Serialize};
+use serde::{self, Deserialize, Serialize};
 
 static PAGE_SIZE: u16 = 4095;
 
@@ -11,6 +11,10 @@ static PAGE_SIZE: u16 = 4095;
 pub enum PageType {
     Leaf,
     Internal,
+}
+
+pub struct Frame {
+    data: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -48,6 +52,8 @@ where
 pub struct Cell<K, V> {
     key: K,
     value: V,
+
+    #[serde(skip)]
     cached_size: Option<usize>,
 }
 
@@ -138,7 +144,18 @@ where
     }
 
     pub fn remove(&mut self, key: &K) -> Result<()> {
-        Ok(())
+        match self.find_key_index(key) {
+            Some(mut cell) => {
+                let offset = self.offsets.remove(cell as usize);
+                let mut cell = self.cells.remove(&(offset as u16)).unwrap();
+                let size = cell.size() as usize;
+                self.free_list.push(size);
+                self.header.page_size -= size as u16;
+                self.header.page_size -= 1;
+                Ok(())
+            }
+            None => anyhow::bail!("No such key found"),
+        }
     }
 
     pub fn insert(&mut self, key: K, value: V) -> Result<()> {
@@ -177,7 +194,7 @@ where
     }
 
     // kind of upper bound, return less than key suppose if cells are 1,3,5,6 if 2 is searched it should return 1
-    pub fn find_pos(&self, key: &K) -> Result<&Cell<K, V>> {
+    pub fn find_key(&self, key: &K) -> Option<&Cell<K, V>> {
         let mut left = 0u16;
         let mut right = self.offsets.len() as u16 - 1;
         let mut result: Option<&Cell<K, V>> = None;
@@ -189,7 +206,7 @@ where
                 .get(&(self.offsets[mid as usize] as u16))
                 .unwrap();
             if &cell.key == key {
-                return Ok(cell);
+                return Some(cell);
             } else if &cell.key < key {
                 result = Some(cell);
                 left = mid + 1;
@@ -199,14 +216,14 @@ where
         }
 
         match result {
-            Some(cell) => Ok(cell),
-            None => Err(anyhow::anyhow!("No such key found")),
+            Some(cell) => Some(cell),
+            None => None
         }
     }
 
-    pub fn find_cell(&self, key: &K) -> Option<&Cell<K, V>> {
-        let mut left = 0u16;
-        let mut right = self.offsets.len() as u16 - 1;
+    pub fn find_key_index(&self, key: &K) -> Option<u16> {
+        let mut left = 0;
+        let mut right = self.offsets.len() as i32 - 1;
 
         while left <= right {
             let mid = (left + right) / 2;
@@ -215,7 +232,7 @@ where
                 .get(&(self.offsets[mid as usize] as u16))
                 .unwrap();
             if &cell.key == key {
-                return Some(cell);
+                return Some(mid as u16);
             } else if &cell.key < key {
                 left = mid + 1;
             } else {
@@ -262,7 +279,7 @@ mod tests {
         let mut page = SlottedPage::new(0, None, PageType::Internal).unwrap();
         page.insert("key1".to_string(), "value1".to_string())
             .unwrap();
-        let cell = page.find_cell(&"key1".to_string());
+        let cell = page.find_key(&"key1".to_string());
         assert!(cell.is_some());
     }
 
@@ -276,9 +293,9 @@ mod tests {
         page.insert("key3".to_string(), "value3".to_string())
             .unwrap();
 
-        let cell1 = page.find_cell(&"key1".to_string());
-        let cell2 = page.find_cell(&"key2".to_string());
-        let cell3 = page.find_cell(&"key3".to_string());
+        let cell1 = page.find_key(&"key1".to_string());
+        let cell2 = page.find_key(&"key2".to_string());
+        let cell3 = page.find_key(&"key3".to_string());
 
         assert!(cell1.is_some());
         assert!(cell2.is_some());
@@ -337,9 +354,14 @@ mod tests {
             }
         } {}
 
-        let delete_cells = vec!["key11", "key10", "key4"];
+        let delete_cells = vec!["key11", "key10", "key4", "key3", "key2"];
         for key in delete_cells {
-            // page.remove(&key);
+            assert!(page.remove(&key.to_string()).is_ok());
         }
+
+        assert_eq!(page.free_list.len(), 5);
+        assert_eq!(page.free_list.iter().sum::<usize>(), 27);
+        assert_eq!(page.header.page_size, 3870);
+        assert_eq!(page.offsets.len(), index - 5);
     }
 }
